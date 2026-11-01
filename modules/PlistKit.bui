@@ -1,0 +1,119 @@
+Public Function PropertyListsSupported() As Boolean
+    #If TargetMac Then
+        Return True
+    #Else
+        Return False
+    #End If
+End Function
+
+#If TargetMac Then
+    Private Declare Function NativeClass Lib "objc" Alias "objc_getClass" (name As String) As Ptr
+    Private Declare Function Allocate Lib "Foundation" Selector "alloc" (cls As Ptr) As Ptr
+    Private Declare Function InitObject Lib "Foundation" Selector "init" (object As Ptr) As Ptr
+    Private Declare Function NewPool Lib "Foundation" Selector "new" (cls As Ptr) As Ptr
+    Private Declare Sub DrainPool Lib "Foundation" Selector "drain" (pool As Ptr)
+    Private Declare Sub ReleaseObject Lib "CoreFoundation" Alias "CFRelease" (value As Ptr)
+    Private Function NativeText(value As Ptr) As String
+        If value = Nil Then Return ""
+        Return CType(CType(value, CFStringRef), String)
+    End Function
+    Private Declare Function CreateData Lib "CoreFoundation" Alias "CFDataCreate" (allocator As Ptr, data As Ptr, length As Integer) As Ptr
+    Private Declare Function DataLength Lib "CoreFoundation" Alias "CFDataGetLength" (data As Ptr) As Integer
+    Private Declare Function DataBytes Lib "CoreFoundation" Alias "CFDataGetBytePtr" (data As Ptr) As Ptr
+    Private Function CopyData(data As Ptr) As Bytes
+        If data = Nil Then Throw New Exception("The native operation returned no data")
+        Dim outputValue As New Bytes()
+        outputValue.Append(DataBytes(data), DataLength(data))
+        Return outputValue
+    End Function
+    Private Declare Function ParsePlist Lib "Foundation" Selector "propertyListWithData:options:format:error:" (cls As Ptr, data As Ptr, options As Integer, ByRef format As Integer, ByRef errorObject As Ptr) As Ptr
+    Private Declare Function SerializePlist Lib "Foundation" Selector "dataWithPropertyList:format:options:error:" (cls As Ptr, value As Ptr, format As Integer, options As Integer, ByRef errorObject As Ptr) As Ptr
+    Private Declare Function IsKind Lib "Foundation" Selector "isKindOfClass:" (object As Ptr, cls As Ptr) As UInt8
+    Private Declare Function ValidPlist Lib "Foundation" Selector "propertyList:isValidForFormat:" (cls As Ptr, value As Ptr, format As Integer) As UInt8
+    Private Declare Function ParseJSON Lib "Foundation" Selector "JSONObjectWithData:options:error:" (cls As Ptr, data As Ptr, options As Integer, ByRef errorObject As Ptr) As Ptr
+    Private Declare Function SerializeJSON Lib "Foundation" Selector "dataWithJSONObject:options:error:" (cls As Ptr, value As Ptr, options As Integer, ByRef errorObject As Ptr) As Ptr
+    Private Declare Function JSONValid Lib "Foundation" Selector "isValidJSONObject:" (cls As Ptr, value As Ptr) As UInt8
+    Private Declare Function ErrorDescription Lib "Foundation" Selector "localizedDescription" (errorObject As Ptr) As Ptr
+    Private Function ParseData(data As Bytes, ByRef format As Integer) As Ptr
+        If data = Nil Then Throw New InvalidArgumentException("Property-list data is required")
+        If data.Count = 0 Then Throw New InvalidArgumentException("Property-list data is empty")
+        Dim native As Ptr = CreateData(Nil, data.DataPtr(), data.Count)
+        Try
+            Dim errorObject As Ptr = Nil
+            Dim outputValue As Ptr = ParsePlist(NativeClass("NSPropertyListSerialization"), native, 0, format, errorObject)
+            If outputValue = Nil Then Throw New InvalidArgumentException("Invalid property list: " + NativeText(ErrorDescription(errorObject)))
+            Return outputValue
+        Finally
+            ReleaseObject(native)
+        End Try
+    End Function
+    Private Function WritePlist(value As Ptr, binary As Boolean) As Bytes
+        Dim format As Integer = 100
+        If binary Then format = 200
+        Dim errorObject As Ptr = Nil
+        If ValidPlist(NativeClass("NSPropertyListSerialization"), value, format) = 0 Then Throw New InvalidArgumentException("JSON null is not a property-list value")
+        Dim data As Ptr = SerializePlist(NativeClass("NSPropertyListSerialization"), value, format, 0, errorObject)
+        If data = Nil Then Throw New InvalidArgumentException("Cannot encode property list: " + NativeText(ErrorDescription(errorObject)))
+        Return CopyData(data)
+    End Function
+#End If
+
+
+Public Function EncodePropertyList(value As JSONItem, binary As Boolean = False) As Bytes
+    If value = Nil Then Throw New InvalidArgumentException("A JSON value is required")
+    #If TargetMac Then
+        Dim pool As Ptr = NewPool(NativeClass("NSAutoreleasePool"))
+        Dim data As Ptr = Nil
+        Try
+            Dim text As Bytes = Bytes.FromString(Json.Stringify(value), Text.Encodings.UTF8)
+            data = CreateData(Nil, text.DataPtr(), text.Count)
+            Dim errorObject As Ptr = Nil
+            Dim native As Ptr = ParseJSON(NativeClass("NSJSONSerialization"), data, 4, errorObject)
+            If native = Nil Then Throw New InvalidArgumentException("Invalid JSON value")
+            Return WritePlist(native, binary)
+        Finally
+            If data <> Nil Then ReleaseObject(data)
+            DrainPool(pool)
+        End Try
+    #Else
+        Throw New UnsupportedOperationException("Property lists require macOS")
+    #End If
+End Function
+
+Public Function DecodePropertyList(data As Bytes) As JSONItem
+    #If TargetMac Then
+        Dim pool As Ptr = NewPool(NativeClass("NSAutoreleasePool"))
+        Try
+            Dim format As Integer = 0
+            Dim native As Ptr = ParseData(data, format)
+            ' JSON cannot represent NSData/NSDate values; use ConvertPropertyList for those.
+            Dim errorObject As Ptr = Nil
+            If IsKind(native, NativeClass("NSArray")) <> 0 Or IsKind(native, NativeClass("NSDictionary")) <> 0 Then
+                If JSONValid(NativeClass("NSJSONSerialization"), native) = 0 Then Throw New InvalidArgumentException("Property list contains values JSON cannot represent")
+            ElseIf IsKind(native, NativeClass("NSString")) = 0 And IsKind(native, NativeClass("NSNumber")) = 0 Then
+                Throw New InvalidArgumentException("Property list contains values JSON cannot represent")
+            End If
+            Dim encoded As Ptr = SerializeJSON(NativeClass("NSJSONSerialization"), native, 4, errorObject)
+            If encoded = Nil Then Throw New InvalidArgumentException("Property list contains values JSON cannot represent")
+            Return Json.Parse(CopyData(encoded).ToString(Text.Encodings.UTF8))
+        Finally
+            DrainPool(pool)
+        End Try
+    #Else
+        Throw New UnsupportedOperationException("Property lists require macOS")
+    #End If
+End Function
+
+Public Function ConvertPropertyList(data As Bytes, binary As Boolean) As Bytes
+    #If TargetMac Then
+        Dim pool As Ptr = NewPool(NativeClass("NSAutoreleasePool"))
+        Try
+            Dim format As Integer = 0
+            Return WritePlist(ParseData(data, format), binary)
+        Finally
+            DrainPool(pool)
+        End Try
+    #Else
+        Throw New UnsupportedOperationException("Property lists require macOS")
+    #End If
+End Function
