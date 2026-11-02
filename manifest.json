@@ -2,7 +2,7 @@
   "schema": 1,
   "name": "plistkit",
   "version": "0.1.0",
-  "description": "Native XML/binary property-list codecs and JSON-compatible conversion",
+  "description": "Read and write XML and binary property lists",
   "platforms": [
     "arm64-apple-macos",
     "x86_64-apple-macos",
